@@ -17,7 +17,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
@@ -780,29 +779,30 @@ func TestManagerCTZeroIngestion(t *testing.T) {
 
 			once := sync.Once{}
 			// Start fake HTTP target to that allow one scrape only.
-			server := httptest.NewServer(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					fail := true
-					once.Do(func() {
-						fail = false
-						w.Header().Set("Content-Type", `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`)
 
-						ctrType := dto.MetricType_COUNTER
-						w.Write(protoMarshalDelimited(t, &dto.MetricFamily{
-							Name:   proto.String(mName),
-							Type:   &ctrType,
-							Metric: []*dto.Metric{{Counter: tc.counterSample}},
-						}))
-					})
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fail := true
+				once.Do(func() {
+					fail = false
+					w.Header().Set("Content-Type", `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`)
 
-					if fail {
-						w.WriteHeader(http.StatusInternalServerError)
-					}
-				}),
-			)
-			defer server.Close()
+					ctrType := dto.MetricType_COUNTER
+					w.Write(protoMarshalDelimited(t, &dto.MetricFamily{
+						Name:   proto.String(mName),
+						Type:   &ctrType,
+						Metric: []*dto.Metric{{Counter: tc.counterSample}},
+					}))
+				})
 
-			serverURL, err := url.Parse(server.URL)
+				if fail {
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+			})
+			// This enables scraper to read metrics from the handler directly without making HTTP request
+			SetDefaultGathererHandler(handler)
+			defer SetDefaultGathererHandler(nil)
+
+			serverURL, err := url.Parse("http://not-started:8080")
 			require.NoError(t, err)
 
 			// Add fake target directly into tsets + reload. Normally users would use

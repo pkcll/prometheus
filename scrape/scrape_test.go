@@ -2333,6 +2333,20 @@ func TestScrapeLoopOutOfBoundsTimeError(t *testing.T) {
 	require.Equal(t, 0, seriesAdded)
 }
 
+const useGathererHandler = true
+
+func newHTTPTestServer(handler http.Handler) *httptest.Server {
+	if useGathererHandler {
+		server := httptest.NewUnstartedServer(handler)
+		server.URL = "http://not-started:8080"
+		SetDefaultGathererHandler(handler)
+		return server
+	}
+	server := httptest.NewServer(handler)
+	SetDefaultGathererHandler(nil)
+	return server
+}
+
 func TestTargetScraperScrapeOK(t *testing.T) {
 	const (
 		configTimeout   = 1500 * time.Millisecond
@@ -2341,7 +2355,7 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 
 	var protobufParsing bool
 
-	server := httptest.NewServer(
+	server := newHTTPTestServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if protobufParsing {
 				accept := r.Header.Get("Accept")
@@ -2357,6 +2371,7 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 		}),
 	)
 	defer server.Close()
+	defer SetDefaultGathererHandler(nil)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
@@ -2364,7 +2379,7 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 	}
 
 	runTest := func(acceptHeader string) {
-		ts := &targetScraper{
+		ts := newScraper(&targetScraper{
 			Target: &Target{
 				labels: labels.FromStrings(
 					model.SchemeLabel, serverURL.Scheme,
@@ -2374,7 +2389,7 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 			client:       http.DefaultClient,
 			timeout:      configTimeout,
 			acceptHeader: acceptHeader,
-		}
+		})
 		var buf bytes.Buffer
 
 		resp, err := ts.scrape(context.Background())
@@ -2393,19 +2408,20 @@ func TestTargetScraperScrapeOK(t *testing.T) {
 func TestTargetScrapeScrapeCancel(t *testing.T) {
 	block := make(chan struct{})
 
-	server := httptest.NewServer(
+	server := newHTTPTestServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			<-block
 		}),
 	)
 	defer server.Close()
+	defer SetDefaultGathererHandler(nil)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
 		panic(err)
 	}
 
-	ts := &targetScraper{
+	ts := newScraper(&targetScraper{
 		Target: &Target{
 			labels: labels.FromStrings(
 				model.SchemeLabel, serverURL.Scheme,
@@ -2414,7 +2430,7 @@ func TestTargetScrapeScrapeCancel(t *testing.T) {
 		},
 		client:       http.DefaultClient,
 		acceptHeader: acceptHeader(config.DefaultGlobalConfig.ScrapeProtocols),
-	}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errc := make(chan error, 1)
@@ -2448,19 +2464,20 @@ func TestTargetScrapeScrapeCancel(t *testing.T) {
 }
 
 func TestTargetScrapeScrapeNotFound(t *testing.T) {
-	server := httptest.NewServer(
+	server := newHTTPTestServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}),
 	)
 	defer server.Close()
+	defer SetDefaultGathererHandler(nil)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
 		panic(err)
 	}
 
-	ts := &targetScraper{
+	ts := newScraper(&targetScraper{
 		Target: &Target{
 			labels: labels.FromStrings(
 				model.SchemeLabel, serverURL.Scheme,
@@ -2469,11 +2486,12 @@ func TestTargetScrapeScrapeNotFound(t *testing.T) {
 		},
 		client:       http.DefaultClient,
 		acceptHeader: acceptHeader(config.DefaultGlobalConfig.ScrapeProtocols),
-	}
+	})
 
 	resp, err := ts.scrape(context.Background())
 	require.NoError(t, err)
 	_, err = ts.readResponse(context.Background(), resp, io.Discard)
+	require.Error(t, err)
 	require.Contains(t, err.Error(), "404", "Expected \"404 NotFound\" error but got: %s", err)
 }
 
@@ -2483,7 +2501,7 @@ func TestTargetScraperBodySizeLimit(t *testing.T) {
 		responseBody  = "metric_a 1\nmetric_b 2\n"
 	)
 	var gzipResponse bool
-	server := httptest.NewServer(
+	server := newHTTPTestServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", `text/plain; version=0.0.4`)
 			if gzipResponse {
@@ -2497,6 +2515,7 @@ func TestTargetScraperBodySizeLimit(t *testing.T) {
 		}),
 	)
 	defer server.Close()
+	defer SetDefaultGathererHandler(nil)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
@@ -2515,37 +2534,38 @@ func TestTargetScraperBodySizeLimit(t *testing.T) {
 		acceptHeader:  acceptHeader(config.DefaultGlobalConfig.ScrapeProtocols),
 		metrics:       newTestScrapeMetrics(t),
 	}
+	s := newScraper(ts)
 	var buf bytes.Buffer
 
 	// Target response uncompressed body, scrape with body size limit.
-	resp, err := ts.scrape(context.Background())
+	resp, err := s.scrape(context.Background())
 	require.NoError(t, err)
-	_, err = ts.readResponse(context.Background(), resp, &buf)
+	_, err = s.readResponse(context.Background(), resp, &buf)
 	require.ErrorIs(t, err, errBodySizeLimit)
 	require.Equal(t, bodySizeLimit, buf.Len())
 	// Target response gzip compressed body, scrape with body size limit.
 	gzipResponse = true
 	buf.Reset()
-	resp, err = ts.scrape(context.Background())
+	resp, err = s.scrape(context.Background())
 	require.NoError(t, err)
-	_, err = ts.readResponse(context.Background(), resp, &buf)
+	_, err = s.readResponse(context.Background(), resp, &buf)
 	require.ErrorIs(t, err, errBodySizeLimit)
 	require.Equal(t, bodySizeLimit, buf.Len())
 	// Target response uncompressed body, scrape without body size limit.
 	gzipResponse = false
 	buf.Reset()
 	ts.bodySizeLimit = 0
-	resp, err = ts.scrape(context.Background())
+	resp, err = s.scrape(context.Background())
 	require.NoError(t, err)
-	_, err = ts.readResponse(context.Background(), resp, &buf)
+	_, err = s.readResponse(context.Background(), resp, &buf)
 	require.NoError(t, err)
 	require.Len(t, responseBody, buf.Len())
 	// Target response gzip compressed body, scrape without body size limit.
 	gzipResponse = true
 	buf.Reset()
-	resp, err = ts.scrape(context.Background())
+	resp, err = s.scrape(context.Background())
 	require.NoError(t, err)
-	_, err = ts.readResponse(context.Background(), resp, &buf)
+	_, err = s.readResponse(context.Background(), resp, &buf)
 	require.NoError(t, err)
 	require.Len(t, responseBody, buf.Len())
 }
@@ -3062,7 +3082,7 @@ func TestScrapeReportLimit(t *testing.T) {
 		scrapedTwice = make(chan bool)
 	)
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newHTTPTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "metric_a 44\nmetric_b 44\nmetric_c 44\nmetric_d 44\n")
 		scrapes++
 		if scrapes == 2 {
@@ -3070,6 +3090,7 @@ func TestScrapeReportLimit(t *testing.T) {
 		}
 	}))
 	defer ts.Close()
+	defer SetDefaultGathererHandler(nil)
 
 	sp, err := newScrapePool(cfg, s, 0, nil, nil, &Options{}, newTestScrapeMetrics(t))
 	require.NoError(t, err)
@@ -3310,7 +3331,7 @@ test_summary_count 199
 	scrapeCount := 0
 	scraped := make(chan bool)
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newHTTPTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, metricsText)
 		scrapeCount++
 		if scrapeCount > 2 {
@@ -3318,6 +3339,7 @@ test_summary_count 199
 		}
 	}))
 	defer ts.Close()
+	defer SetDefaultGathererHandler(nil)
 
 	sp, err := newScrapePool(config, simpleStorage, 0, nil, nil, &Options{}, newTestScrapeMetrics(t))
 	require.NoError(t, err)
@@ -3435,7 +3457,7 @@ func TestScrapeLoopCompression(t *testing.T) {
 		t.Run(fmt.Sprintf("compression=%v,acceptEncoding=%s", tc.enableCompression, tc.acceptEncoding), func(t *testing.T) {
 			scraped := make(chan bool)
 
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ts := newHTTPTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, tc.acceptEncoding, r.Header.Get("Accept-Encoding"), "invalid value of the Accept-Encoding header")
 				fmt.Fprint(w, metricsText)
 				close(scraped)
@@ -3596,7 +3618,7 @@ func BenchmarkTargetScraperGzip(b *testing.B) {
 
 	for _, scenario := range scenarios {
 		b.Run(fmt.Sprintf("metrics=%d", scenario.metricsCount), func(b *testing.B) {
-			ts := &targetScraper{
+			ts := newScraper(&targetScraper{
 				Target: &Target{
 					labels: labels.FromStrings(
 						model.SchemeLabel, serverURL.Scheme,
@@ -3606,7 +3628,7 @@ func BenchmarkTargetScraperGzip(b *testing.B) {
 				},
 				client:  client,
 				timeout: time.Second,
-			}
+			})
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				_, err = ts.scrape(context.Background())
@@ -3705,7 +3727,7 @@ func testNativeHistogramMaxSchemaSet(t *testing.T, minBucketFactor string, expec
 	buffer := protoMarshalDelimited(t, histogramMetricFamily)
 
 	// Create a HTTP server to serve /metrics via ProtoBuf
-	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	metricsServer := newHTTPTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`)
 		w.Write(buffer)
 	}))
