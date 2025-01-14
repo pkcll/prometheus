@@ -2048,8 +2048,8 @@ func (gs *gathererScraper) scrape(ctx context.Context) (*http.Response, error) {
 	}
 }
 
+// Implements http.ResponseWriter.
 type responseWriter struct {
-	http.ResponseWriter
 	response *http.Response
 	// Writes to response body
 	w io.Writer
