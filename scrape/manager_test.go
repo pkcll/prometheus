@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
@@ -713,6 +714,18 @@ scrape_configs:
 	require.ElementsMatch(t, []string{"job1", "job3"}, scrapeManager.ScrapePools())
 }
 
+type testGatherer struct {
+	t       *testing.T
+	metrics []*dto.MetricFamily
+}
+
+var _ prometheus.Gatherer = &testGatherer{}
+
+func (g *testGatherer) Gather() ([]*dto.MetricFamily, error) {
+	g.t.Log("testGatherer.Gather is called")
+	return g.metrics, nil
+}
+
 // TestManagerCTZeroIngestion tests scrape manager for CT cases.
 func TestManagerCTZeroIngestion(t *testing.T) {
 	const mName = "expected_counter"
@@ -752,84 +765,101 @@ func TestManagerCTZeroIngestion(t *testing.T) {
 			expectedValues:        []float64{1.0},
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			app := &collectResultAppender{}
-			scrapeManager, err := NewManager(
-				&Options{
-					EnableCreatedTimestampZeroIngestion: tc.enableCTZeroIngestion,
-					skipOffsetting:                      true,
-				},
-				log.NewLogfmtLogger(os.Stderr),
-				&collectResultAppendable{app},
-				prometheus.NewRegistry(),
-			)
-			require.NoError(t, err)
+		for _, useHTTPTestServer := range []bool{true, false} {
+			t.Run(fmt.Sprintf("useHTTPTestServer:%t", useHTTPTestServer), func(t *testing.T) {
+				t.Run(tc.name, func(t *testing.T) {
+					app := &collectResultAppender{}
+					scrapeManager, err := NewManager(
+						&Options{
+							EnableCreatedTimestampZeroIngestion: tc.enableCTZeroIngestion,
+							skipOffsetting:                      true,
+						},
+						log.NewLogfmtLogger(os.Stderr),
+						&collectResultAppendable{app},
+						prometheus.NewRegistry(),
+					)
+					require.NoError(t, err)
 
-			require.NoError(t, scrapeManager.ApplyConfig(&config.Config{
-				GlobalConfig: config.GlobalConfig{
-					// Disable regular scrapes.
-					ScrapeInterval: model.Duration(9999 * time.Minute),
-					ScrapeTimeout:  model.Duration(5 * time.Second),
-					// Ensure the proto is chosen. We need proto as it's the only protocol
-					// with the CT parsing support.
-					ScrapeProtocols: []config.ScrapeProtocol{config.PrometheusProto},
-				},
-				ScrapeConfigs: []*config.ScrapeConfig{{JobName: "test"}},
-			}))
+					require.NoError(t, scrapeManager.ApplyConfig(&config.Config{
+						GlobalConfig: config.GlobalConfig{
+							// Disable regular scrapes.
+							ScrapeInterval: model.Duration(9999 * time.Minute),
+							ScrapeTimeout:  model.Duration(5 * time.Second),
+							// Ensure the proto is chosen. We need proto as it's the only protocol
+							// with the CT parsing support.
+							ScrapeProtocols: []config.ScrapeProtocol{config.PrometheusProto},
+						},
+						ScrapeConfigs: []*config.ScrapeConfig{{JobName: "test"}},
+					}))
 
-			once := sync.Once{}
-			// Start fake HTTP target to that allow one scrape only.
-
-			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fail := true
-				once.Do(func() {
-					fail = false
-					w.Header().Set("Content-Type", `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`)
-
+					once := sync.Once{}
+					// Start fake HTTP target to that allow one scrape only.
 					ctrType := dto.MetricType_COUNTER
-					w.Write(protoMarshalDelimited(t, &dto.MetricFamily{
+					mf := &dto.MetricFamily{
 						Name:   proto.String(mName),
 						Type:   &ctrType,
 						Metric: []*dto.Metric{{Counter: tc.counterSample}},
-					}))
+					}
+					mfs := []*dto.MetricFamily{mf}
+
+					handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						fail := true
+						once.Do(func() {
+							fail = false
+							w.Header().Set("Content-Type", `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`)
+							t.Log("Received HTTP request to the test server from scraper")
+							// Dont write anything to the response body
+							// w.Write(protoMarshalDelimited(t, mf))
+						})
+						if fail {
+							w.WriteHeader(http.StatusInternalServerError)
+						}
+					})
+					var serverURL *url.URL
+					if useHTTPTestServer {
+						server := httptest.NewServer(handler)
+						defer server.Close()
+						serverURL, err = url.Parse(server.URL)
+						require.NoError(t, err)
+					} else {
+						// This enables scraper to read metrics from the handler directly without making HTTP request
+						SetDefaultGathererHandler(handler)
+						defer SetDefaultGathererHandler(nil)
+						serverURL, err = url.Parse("http://not-started:8080")
+						require.NoError(t, err)
+					}
+
+					testPromGatherer := prometheus.Gatherer(&testGatherer{t, mfs})
+					// This will cause scrapeLoop to a switch from ProtobufParser to GathererParser which reads directly from testPromGatherer
+					SetDefaultGatherer(testPromGatherer)
+
+					// Add fake target directly into tsets + reload. Normally users would use
+					// Manager.Run and wait for minimum 5s refresh interval.
+					scrapeManager.updateTsets(map[string][]*targetgroup.Group{
+						"test": {{
+							Targets: []model.LabelSet{{
+								model.SchemeLabel:  model.LabelValue(serverURL.Scheme),
+								model.AddressLabel: model.LabelValue(serverURL.Host),
+							}},
+						}},
+					})
+					scrapeManager.reload()
+
+					// Wait for one scrape.
+					ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+					defer cancel()
+					require.NoError(t, runutil.Retry(100*time.Millisecond, ctx.Done(), func() error {
+						if countFloatSamples(app, mName) != len(tc.expectedValues) {
+							return fmt.Errorf("expected %v samples", tc.expectedValues)
+						}
+						return nil
+					}), "after 1 minute")
+					scrapeManager.Stop()
+
+					require.Equal(t, tc.expectedValues, getResultFloats(app, mName))
 				})
-
-				if fail {
-					w.WriteHeader(http.StatusInternalServerError)
-				}
 			})
-			// This enables scraper to read metrics from the handler directly without making HTTP request
-			SetDefaultGathererHandler(handler)
-			defer SetDefaultGathererHandler(nil)
-
-			serverURL, err := url.Parse("http://not-started:8080")
-			require.NoError(t, err)
-
-			// Add fake target directly into tsets + reload. Normally users would use
-			// Manager.Run and wait for minimum 5s refresh interval.
-			scrapeManager.updateTsets(map[string][]*targetgroup.Group{
-				"test": {{
-					Targets: []model.LabelSet{{
-						model.SchemeLabel:  model.LabelValue(serverURL.Scheme),
-						model.AddressLabel: model.LabelValue(serverURL.Host),
-					}},
-				}},
-			})
-			scrapeManager.reload()
-
-			// Wait for one scrape.
-			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-			defer cancel()
-			require.NoError(t, runutil.Retry(100*time.Millisecond, ctx.Done(), func() error {
-				if countFloatSamples(app, mName) != len(tc.expectedValues) {
-					return fmt.Errorf("expected %v samples", tc.expectedValues)
-				}
-				return nil
-			}), "after 1 minute")
-			scrapeManager.Stop()
-
-			require.Equal(t, tc.expectedValues, getResultFloats(app, mName))
-		})
+		}
 	}
 }
 

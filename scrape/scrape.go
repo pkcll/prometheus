@@ -1492,6 +1492,16 @@ type appendErrors struct {
 
 func (sl *scrapeLoop) append(app storage.Appender, b []byte, contentType string, ts time.Time) (total, added, seriesAdded int, err error) {
 	p, err := textparse.New(b, contentType, sl.scrapeClassicHistograms, sl.symbolTable)
+	if g := GetDefaultGatherer(); g != nil {
+		if mfs, err := g.Gather(); err != nil {
+			level.Debug(sl.l).Log(
+				"msg", "Failed to get metrics from Gather.",
+				"err", err,
+			)
+		} else {
+			p = textparse.NewGathererParser(b, sl.scrapeClassicHistograms, sl.symbolTable, mfs)
+		}
+	}
 	if err != nil {
 		level.Debug(sl.l).Log(
 			"msg", "Invalid content type on scrape, using prometheus parser as fallback.",
@@ -2038,6 +2048,7 @@ func (gs *gathererScraper) scrape(ctx context.Context) (*http.Response, error) {
 		if gs.h != nil {
 			gs.h.ServeHTTP(w, req)
 		}
+		fmt.Println("[gathererScraper] scraping metrics")
 		resCh <- scrapeResult{w.response, nil}
 	}()
 	select {
@@ -2083,7 +2094,11 @@ func (rw *responseWriter) WriteHeader(statusCode int) {
 	rw.response.Status = fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode))
 }
 
-var defaultGathererHandler atomic.Pointer[http.Handler]
+var (
+	defaultGathererHandler atomic.Pointer[http.Handler]
+
+	defaultGatherer atomic.Pointer[prometheus.Gatherer]
+)
 
 // This enables scraper to read metrics from the handler directly without making HTTP request
 func SetDefaultGathererHandler(h http.Handler) {
@@ -2091,12 +2106,20 @@ func SetDefaultGathererHandler(h http.Handler) {
 }
 
 func SetDefaultGatherer(g prometheus.Gatherer) {
+	defaultGatherer.Store(&g)
 	SetDefaultGathererHandler(promhttp.HandlerFor(g, promhttp.HandlerOpts{}))
 }
 
 func GetDefaultGathererHandler() http.Handler {
 	if h := defaultGathererHandler.Load(); h != nil {
 		return *h
+	}
+	return nil
+}
+
+func GetDefaultGatherer() prometheus.Gatherer {
+	if g := defaultGatherer.Load(); g != nil {
+		return *g
 	}
 	return nil
 }
