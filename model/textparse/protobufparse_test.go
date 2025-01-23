@@ -21,11 +21,9 @@ import (
 	"testing"
 
 	"github.com/gogo/protobuf/proto"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
-	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
@@ -34,7 +32,7 @@ import (
 	dto "github.com/prometheus/prometheus/prompb/io/prometheus/client"
 )
 
-func createTestProtoBuf(t *testing.T) (*bytes.Buffer, *testGatherer) {
+func createTestProtoBuf(t *testing.T) *bytes.Buffer {
 	testMetricFamilies := []string{
 		`name: "go_build_info"
 help: "Build information about the main Go module."
@@ -717,25 +715,7 @@ metric: <
 		buf.Write(protoBuf)
 	}
 
-	var metrics []*io_prometheus_client.MetricFamily
-	for _, tmf := range testMetricFamilies {
-		pb := &io_prometheus_client.MetricFamily{}
-		// From text to proto message.
-		require.NoError(t, proto.UnmarshalText(tmf, pb))
-		metrics = append(metrics, pb)
-	}
-
-	return buf, &testGatherer{metrics}
-}
-
-type testGatherer struct {
-	metrics []*io_prometheus_client.MetricFamily
-}
-
-var _ prometheus.Gatherer = &testGatherer{}
-
-func (m *testGatherer) Gather() ([]*io_prometheus_client.MetricFamily, error) {
-	return m.metrics, nil
+	return buf
 }
 
 func TestProtobufParse(t *testing.T) {
@@ -754,10 +734,8 @@ func TestProtobufParse(t *testing.T) {
 		ct      int64
 	}
 
-	_, testPromGatherer := createTestProtoBuf(t)
+	inputBuf := createTestProtoBuf(t)
 
-	metrics, err := testPromGatherer.Gather()
-	require.NoError(t, err)
 	scenarios := []struct {
 		name     string
 		parser   Parser
@@ -765,7 +743,7 @@ func TestProtobufParse(t *testing.T) {
 	}{
 		{
 			name:   "ignore classic buckets of native histograms",
-			parser: NewGathererParser([]byte{}, false, labels.NewSymbolTable(), metrics),
+			parser: NewProtobufParser(inputBuf.Bytes(), false, labels.NewSymbolTable()),
 			expected: []parseResult{
 				{
 					m:    "go_build_info",
@@ -1302,7 +1280,7 @@ func TestProtobufParse(t *testing.T) {
 		},
 		{
 			name:   "parse classic and native buckets",
-			parser: NewGathererParser([]byte{}, true, labels.NewSymbolTable(), metrics),
+			parser: NewProtobufParser(inputBuf.Bytes(), true, labels.NewSymbolTable()),
 			expected: []parseResult{
 				{ // 0
 					m:    "go_build_info",
