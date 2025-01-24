@@ -25,7 +25,6 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/gogo/protobuf/types"
-	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/model/exemplar"
@@ -79,7 +78,7 @@ type ProtobufParser struct {
 	// The following are just shenanigans to satisfy the Parser interface.
 	metricBytes *bytes.Buffer // A somewhat fluid representation of the current metric.
 
-	gathererIterator *gathererIterator
+	readDelimitedFunc func([]byte, *dto.MetricFamily) (int, error)
 }
 
 // NewProtobufParser returns a parser for the payload in the byte slice.
@@ -413,7 +412,7 @@ func (p *ProtobufParser) Next() (Entry, error) {
 	case EntryInvalid:
 		p.metricPos = 0
 		p.fieldPos = -2
-		n, err := readDelimited(p.in[p.inPos:], p.mf, p.gathererIterator)
+		n, err := p.readDelimited(p.in[p.inPos:], p.mf)
 		p.inPos += n
 		if err != nil {
 			return p.state, err
@@ -582,18 +581,21 @@ func (p *ProtobufParser) getMagicLabel() (bool, string, string) {
 	return false, "", ""
 }
 
+func (p *ProtobufParser) readDelimited(b []byte, mf *dto.MetricFamily) (n int, err error) {
+	if p.readDelimitedFunc != nil {
+		return p.readDelimitedFunc(b, mf)
+	}
+	return readDelimited(b, mf)
+}
+
 var errInvalidVarint = errors.New("protobufparse: invalid varint encountered")
 
-// readDelimited is essentially doing what the function of the same name in
+// ReadDelimited is essentially doing what the function of the same name in
 // github.com/matttproud/golang_protobuf_extensions/pbutil is doing, but it is
 // specific to a MetricFamily, utilizes the more efficient gogo-protobuf
 // unmarshaling, and acts on a byte slice directly without any additional
 // staging buffers.
-func readDelimited(b []byte, mf *dto.MetricFamily, iter *gathererIterator) (n int, err error) {
-	if iter != nil {
-		err := iter.readNext(mf)
-		return 0, err
-	}
+func readDelimited(b []byte, mf *dto.MetricFamily) (n int, err error) {
 	if len(b) == 0 {
 		return 0, io.EOF
 	}
@@ -648,107 +650,4 @@ func isNativeHistogram(h *dto.Histogram) bool {
 		len(h.GetNegativeSpan()) > 0 ||
 		h.GetZeroThreshold() > 0 ||
 		h.GetZeroCount() > 0
-}
-
-func convertMetricFamilyPb(srcMf *io_prometheus_client.MetricFamily, dst *dto.MetricFamily) (n int, err error) {
-	protoBuf, err := proto.Marshal(srcMf)
-	if err != nil {
-		return 0, err
-	}
-	dst.Reset()
-	err = dst.Unmarshal(protoBuf)
-	if err != nil {
-		return 0, err
-	}
-	return len(protoBuf), nil
-}
-
-// Converts *io_prometheus_client.MetricFamily to *dto.MetricFamily
-// NOTE: This is incomplete implementation
-func convertMetricFamily(src *io_prometheus_client.MetricFamily, dst *dto.MetricFamily) {
-	dst.Name = src.GetName()
-	dst.Help = src.GetHelp()
-	dst.Type = dto.MetricType(src.GetType())
-	dst.Unit = src.GetUnit()
-	dst.Metric = make([]dto.Metric, len(src.Metric))
-	for i, m := range src.Metric {
-		dst.Metric[i] = dto.Metric{
-			Label: make([]dto.LabelPair, 0, len(m.GetLabel())),
-		}
-		for _, lp := range m.GetLabel() {
-			dst.Metric[i].Label = append(dst.Metric[i].Label, dto.LabelPair{
-				Name:  lp.GetName(),
-				Value: lp.GetValue(),
-			})
-		}
-		switch src.GetType() {
-		case io_prometheus_client.MetricType_COUNTER:
-			dst.Metric[i].Counter = &dto.Counter{
-				Value: m.GetCounter().GetValue(),
-			}
-		case io_prometheus_client.MetricType_GAUGE:
-			dst.Metric[i].Gauge = &dto.Gauge{
-				Value: m.GetGauge().GetValue(),
-			}
-		case io_prometheus_client.MetricType_SUMMARY:
-			dst.Metric[i].Summary = &dto.Summary{
-				SampleCount: m.GetSummary().GetSampleCount(),
-				SampleSum:   m.GetSummary().GetSampleSum(),
-				Quantile:    make([]dto.Quantile, len(m.GetSummary().GetQuantile())),
-			}
-			for j, q := range m.GetSummary().GetQuantile() {
-				dst.Metric[i].GetSummary().Quantile[j] = dto.Quantile{
-					Quantile: q.GetQuantile(),
-					Value:    q.GetValue(),
-				}
-			}
-		case io_prometheus_client.MetricType_HISTOGRAM:
-			dst.Metric[i].Histogram = &dto.Histogram{
-				SampleCount: m.GetHistogram().GetSampleCount(),
-				SampleSum:   m.GetHistogram().GetSampleSum(),
-				Bucket:      make([]dto.Bucket, len(m.GetHistogram().GetBucket())),
-			}
-		}
-		for j, b := range m.GetHistogram().GetBucket() {
-			dst.Metric[i].GetHistogram().Bucket[j] = dto.Bucket{
-				CumulativeCount: b.GetCumulativeCount(),
-				UpperBound:      b.GetUpperBound(),
-			}
-		}
-	}
-}
-
-// write me iterator over prometheus.Gatherer.Gather() result to get all metrics
-type gathererIterator struct {
-	mfs   []*io_prometheus_client.MetricFamily
-	index int
-}
-
-func (it *gathererIterator) readNext(mf *dto.MetricFamily) error {
-	fmt.Println("[gathererIterator] readNext is called")
-	if it == nil || it.index >= len(it.mfs) {
-		return io.EOF
-	}
-	// Copies proto message from io_prometheus_client.MetricFamily to dto.MetricFamily
-	_, err := convertMetricFamilyPb(it.mfs[it.index], mf)
-	if err != nil {
-		e := fmt.Errorf("failed to convert io_prometheus_client.MetricFamily to dto.MetricFamily: %w", err)
-		// todo:remove this
-		fmt.Println(e)
-		return e
-	}
-	it.index++
-	return nil
-}
-
-func NewGathererParser(b []byte, parseClassicHistograms bool, st *labels.SymbolTable, mfs []*io_prometheus_client.MetricFamily) Parser {
-	return &ProtobufParser{
-		in:                     b,
-		state:                  EntryInvalid,
-		mf:                     &dto.MetricFamily{},
-		metricBytes:            &bytes.Buffer{},
-		parseClassicHistograms: parseClassicHistograms,
-		builder:                labels.NewScratchBuilderWithSymbolTable(st, 16),
-		gathererIterator:       &gathererIterator{mfs: mfs},
-	}
 }

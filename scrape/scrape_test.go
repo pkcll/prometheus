@@ -688,7 +688,7 @@ func newBasicScrapeLoop(t testing.TB, ctx context.Context, scraper scraper, app 
 }
 
 func TestScrapeLoopStopBeforeRun(t *testing.T) {
-	scraper := &testScraper{}
+	scraper := &scraperShim{}
 	sl := newBasicScrapeLoop(t, context.Background(), scraper, nil, 1)
 
 	// The scrape pool synchronizes on stopping scrape loops. However, new scrape
@@ -740,7 +740,7 @@ func TestScrapeLoopStop(t *testing.T) {
 	var (
 		signal   = make(chan struct{}, 1)
 		appender = &collectResultAppender{}
-		scraper  = &testScraper{}
+		scraper  = &scraperShim{}
 		app      = func(ctx context.Context) storage.Appender { return appender }
 	)
 
@@ -795,7 +795,7 @@ func TestScrapeLoopRun(t *testing.T) {
 		signal = make(chan struct{}, 1)
 		errc   = make(chan error)
 
-		scraper       = &testScraper{}
+		scraper       = &scraperShim{}
 		app           = func(ctx context.Context) storage.Appender { return &nopAppender{} }
 		scrapeMetrics = newTestScrapeMetrics(t)
 	)
@@ -900,7 +900,7 @@ func TestScrapeLoopForcedErr(t *testing.T) {
 		signal = make(chan struct{}, 1)
 		errc   = make(chan error)
 
-		scraper = &testScraper{}
+		scraper = &scraperShim{}
 		app     = func(ctx context.Context) storage.Appender { return &nopAppender{} }
 	)
 
@@ -938,7 +938,7 @@ func TestScrapeLoopForcedErr(t *testing.T) {
 func TestScrapeLoopMetadata(t *testing.T) {
 	var (
 		signal        = make(chan struct{})
-		scraper       = &testScraper{}
+		scraper       = &scraperShim{}
 		scrapeMetrics = newTestScrapeMetrics(t)
 		cache         = newScrapeCache(scrapeMetrics)
 	)
@@ -1010,7 +1010,7 @@ func simpleTestScrapeLoop(t testing.TB) (context.Context, *scrapeLoop) {
 	t.Cleanup(func() { s.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
-	sl := newBasicScrapeLoop(t, ctx, &testScraper{}, s.Appender, 0)
+	sl := newBasicScrapeLoop(t, ctx, &scraperShim{}, s.Appender, 0)
 	t.Cleanup(func() { cancel() })
 
 	return ctx, sl
@@ -1051,7 +1051,7 @@ func TestScrapeLoopFailWithInvalidLabelsAfterRelabel(t *testing.T) {
 		Separator:   ";",
 		Replacement: "$1",
 	}}
-	sl := newBasicScrapeLoop(t, ctx, &testScraper{}, s.Appender, 0)
+	sl := newBasicScrapeLoop(t, ctx, &scraperShim{}, s.Appender, 0)
 	sl.sampleMutator = func(l labels.Labels) labels.Labels {
 		return mutateSampleLabels(l, target, true, relabelConfig)
 	}
@@ -1111,7 +1111,7 @@ func TestScrapeLoopRunCreatesStaleMarkersOnFailedScrape(t *testing.T) {
 	appender := &collectResultAppender{}
 	var (
 		signal  = make(chan struct{}, 1)
-		scraper = &testScraper{}
+		scraper = &scraperShim{}
 		app     = func(ctx context.Context) storage.Appender { return appender }
 	)
 
@@ -1156,7 +1156,7 @@ func TestScrapeLoopRunCreatesStaleMarkersOnParseFailure(t *testing.T) {
 	appender := &collectResultAppender{}
 	var (
 		signal     = make(chan struct{}, 1)
-		scraper    = &testScraper{}
+		scraper    = &scraperShim{}
 		app        = func(ctx context.Context) storage.Appender { return appender }
 		numScrapes = 0
 	)
@@ -1206,7 +1206,7 @@ func TestScrapeLoopCache(t *testing.T) {
 	appender := &collectResultAppender{}
 	var (
 		signal  = make(chan struct{}, 1)
-		scraper = &testScraper{}
+		scraper = &scraperShim{}
 		app     = func(ctx context.Context) storage.Appender { appender.next = s.Appender(ctx); return appender }
 	)
 
@@ -1270,7 +1270,7 @@ func TestScrapeLoopCacheMemoryExhaustionProtection(t *testing.T) {
 	appender := &collectResultAppender{next: sapp}
 	var (
 		signal  = make(chan struct{}, 1)
-		scraper = &testScraper{}
+		scraper = &scraperShim{}
 		app     = func(ctx context.Context) storage.Appender { return appender }
 	)
 
@@ -2234,7 +2234,7 @@ func TestScrapeLoopAppendExemplarSeries(t *testing.T) {
 
 func TestScrapeLoopRunReportsTargetDownOnScrapeError(t *testing.T) {
 	var (
-		scraper  = &testScraper{}
+		scraper  = &scraperShim{}
 		appender = &collectResultAppender{}
 		app      = func(ctx context.Context) storage.Appender { return appender }
 	)
@@ -2253,7 +2253,7 @@ func TestScrapeLoopRunReportsTargetDownOnScrapeError(t *testing.T) {
 
 func TestScrapeLoopRunReportsTargetDownOnInvalidUTF8(t *testing.T) {
 	var (
-		scraper  = &testScraper{}
+		scraper  = &scraperShim{}
 		appender = &collectResultAppender{}
 		app      = func(ctx context.Context) storage.Appender { return appender }
 	)
@@ -2572,37 +2572,6 @@ func TestTargetScraperBodySizeLimit(t *testing.T) {
 
 // testScraper implements the scraper interface and allows setting values
 // returned by its methods. It also allows setting a custom scrape function.
-type testScraper struct {
-	offsetDur time.Duration
-
-	lastStart    time.Time
-	lastDuration time.Duration
-	lastError    error
-
-	scrapeErr  error
-	scrapeFunc func(context.Context, io.Writer) error
-}
-
-func (ts *testScraper) offset(time.Duration, uint64) time.Duration {
-	return ts.offsetDur
-}
-
-func (ts *testScraper) Report(start time.Time, duration time.Duration, err error) {
-	ts.lastStart = start
-	ts.lastDuration = duration
-	ts.lastError = err
-}
-
-func (ts *testScraper) scrape(ctx context.Context) (*http.Response, error) {
-	return nil, ts.scrapeErr
-}
-
-func (ts *testScraper) readResponse(ctx context.Context, resp *http.Response, w io.Writer) (string, error) {
-	if ts.scrapeFunc != nil {
-		return "", ts.scrapeFunc(ctx, w)
-	}
-	return "", ts.scrapeErr
-}
 
 func TestScrapeLoop_RespectTimestamps(t *testing.T) {
 	s := teststorage.New(t)
@@ -2660,7 +2629,7 @@ func TestScrapeLoopDiscardDuplicateLabels(t *testing.T) {
 	defer s.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	sl := newBasicScrapeLoop(t, ctx, &testScraper{}, s.Appender, 0)
+	sl := newBasicScrapeLoop(t, ctx, &scraperShim{}, s.Appender, 0)
 	defer cancel()
 
 	// We add a good and a bad metric to check that both are discarded.
@@ -2699,7 +2668,7 @@ func TestScrapeLoopDiscardUnnamedMetrics(t *testing.T) {
 	app := s.Appender(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
-	sl := newBasicScrapeLoop(t, context.Background(), &testScraper{}, func(ctx context.Context) storage.Appender { return app }, 0)
+	sl := newBasicScrapeLoop(t, context.Background(), &scraperShim{}, func(ctx context.Context) storage.Appender { return app }, 0)
 	sl.sampleMutator = func(l labels.Labels) labels.Labels {
 		if l.Has("drop") {
 			return labels.FromStrings("no", "name") // This label set will trigger an error.
@@ -2951,7 +2920,7 @@ func TestScrapeAddFast(t *testing.T) {
 	defer s.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	sl := newBasicScrapeLoop(t, ctx, &testScraper{}, s.Appender, 0)
+	sl := newBasicScrapeLoop(t, ctx, &scraperShim{}, s.Appender, 0)
 	defer cancel()
 
 	slApp := sl.appender(ctx)
@@ -3017,7 +2986,7 @@ func TestScrapeReportSingleAppender(t *testing.T) {
 
 	var (
 		signal  = make(chan struct{}, 1)
-		scraper = &testScraper{}
+		scraper = &scraperShim{}
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3393,7 +3362,7 @@ func TestScrapeLoopRunCreatesStaleMarkersOnFailedScrapeForTimestampedMetrics(t *
 	appender := &collectResultAppender{}
 	var (
 		signal  = make(chan struct{}, 1)
-		scraper = &testScraper{}
+		scraper = &scraperShim{}
 		app     = func(ctx context.Context) storage.Appender { return appender }
 	)
 

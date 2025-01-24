@@ -879,6 +879,8 @@ type scrapeLoop struct {
 	metrics *scrapeMetrics
 
 	skipOffsetting bool // For testability.
+
+	newParserFunc func() (textparse.Parser, error)
 }
 
 // scrapeCache tracks mappings of exposed metric strings to label sets and
@@ -1490,18 +1492,16 @@ type appendErrors struct {
 	numExemplarOutOfOrder int
 }
 
-func (sl *scrapeLoop) append(app storage.Appender, b []byte, contentType string, ts time.Time) (total, added, seriesAdded int, err error) {
-	p, err := textparse.New(b, contentType, sl.scrapeClassicHistograms, sl.symbolTable)
-	if g := GetDefaultGatherer(); g != nil {
-		if mfs, err := g.Gather(); err != nil {
-			level.Debug(sl.l).Log(
-				"msg", "Failed to get metrics from Gather.",
-				"err", err,
-			)
-		} else {
-			p = textparse.NewGathererParser(b, sl.scrapeClassicHistograms, sl.symbolTable, mfs)
-		}
+func (sl *scrapeLoop) newParser(b []byte, contentType string) (textparse.Parser, error) {
+	if sl.newParserFunc != nil {
+		return sl.newParserFunc()
 	}
+	return textparse.New(b, contentType, sl.scrapeClassicHistograms, sl.symbolTable)
+}
+
+func (sl *scrapeLoop) append(app storage.Appender, b []byte, contentType string, ts time.Time) (total, added, seriesAdded int, err error) {
+	p, err := sl.newParser(b, contentType)
+
 	if err != nil {
 		level.Debug(sl.l).Log(
 			"msg", "Invalid content type on scrape, using prometheus parser as fallback.",
