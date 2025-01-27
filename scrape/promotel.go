@@ -45,28 +45,41 @@ func (gl *GathereLoop) ScrapeAndReport(
 	return gl.scrapeAndReport(last, appendTime, errc)
 }
 
+func (gl *GathereLoop) UnregisterMetrics() {
+	gl.scrapeLoop.metrics.Unregister()
+}
+
 func noopScrapeFunc(context.Context, io.Writer) error { return nil }
 
 func newNoopTarget(lbls labels.Labels) *Target {
 	return &Target{labels: lbls}
 }
 
+func NewScrapeMetrics(reg prometheus.Registerer) (*scrapeMetrics, error) {
+	return newScrapeMetrics(reg)
+}
+
+const (
+	jobLabelDefault      = "promotel_job"
+	instanceLabelDefault = "promotel_instance"
+)
+
 func NewGathererLoop(ctx context.Context, logger log.Logger, app storage.Appendable, reg prometheus.Registerer, g prometheus.Gatherer, interval time.Duration) (*GathereLoop, error) {
 	nopMutator := func(l labels.Labels) labels.Labels { return l }
-	metrics, err := newScrapeMetrics(reg)
-	if err != nil {
-		return nil, err
-	}
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
 	target := newNoopTarget([]labels.Label{
-		{Name: model.JobLabel, Value: "promotel"},      // required label
-		{Name: model.InstanceLabel, Value: "promotel"}, // required label
+		{Name: model.JobLabel, Value: jobLabelDefault},           // required label
+		{Name: model.InstanceLabel, Value: instanceLabelDefault}, // required label
 		{Name: model.ScrapeIntervalLabel, Value: interval.String()},
 		{Name: model.MetricsPathLabel, Value: config.DefaultScrapeConfig.MetricsPath},
 		{Name: model.SchemeLabel, Value: config.DefaultScrapeConfig.Scheme},
 	})
+	metrics, err := newScrapeMetrics(reg)
+	if err != nil {
+		return nil, err
+	}
 	loop := &GathereLoop{
 		newScrapeLoop(
 			ctx,
