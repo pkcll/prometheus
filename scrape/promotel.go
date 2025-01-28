@@ -12,8 +12,9 @@ import (
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/model/textparse"
 	"github.com/prometheus/prometheus/storage"
+
+	"github.com/pkcll/prometheus/model/textparse"
 )
 
 type GathereLoop struct {
