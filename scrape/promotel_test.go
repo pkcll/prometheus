@@ -14,15 +14,15 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/stretchr/testify/require"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
-	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
 
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/pkcll/prometheus/scrape"
 )
 
 // TestScrapeLoopScrapeAndReport exercises scrapeAndReport with various scenarios
