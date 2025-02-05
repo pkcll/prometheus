@@ -77,6 +77,8 @@ type ProtobufParser struct {
 
 	// The following are just shenanigans to satisfy the Parser interface.
 	metricBytes *bytes.Buffer // A somewhat fluid representation of the current metric.
+
+	readDelimitedFunc func([]byte, *dto.MetricFamily) (int, error)
 }
 
 // NewProtobufParser returns a parser for the payload in the byte slice.
@@ -410,7 +412,7 @@ func (p *ProtobufParser) Next() (Entry, error) {
 	case EntryInvalid:
 		p.metricPos = 0
 		p.fieldPos = -2
-		n, err := readDelimited(p.in[p.inPos:], p.mf)
+		n, err := p.readDelimited(p.in[p.inPos:], p.mf)
 		p.inPos += n
 		if err != nil {
 			return p.state, err
@@ -579,9 +581,16 @@ func (p *ProtobufParser) getMagicLabel() (bool, string, string) {
 	return false, "", ""
 }
 
+func (p *ProtobufParser) readDelimited(b []byte, mf *dto.MetricFamily) (n int, err error) {
+	if p.readDelimitedFunc != nil {
+		return p.readDelimitedFunc(b, mf)
+	}
+	return readDelimited(b, mf)
+}
+
 var errInvalidVarint = errors.New("protobufparse: invalid varint encountered")
 
-// readDelimited is essentially doing what the function of the same name in
+// ReadDelimited is essentially doing what the function of the same name in
 // github.com/matttproud/golang_protobuf_extensions/pbutil is doing, but it is
 // specific to a MetricFamily, utilizes the more efficient gogo-protobuf
 // unmarshaling, and acts on a byte slice directly without any additional

@@ -43,11 +43,12 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/relabel"
-	"github.com/prometheus/prometheus/model/textparse"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/pool"
+
+	"github.com/pkcll/prometheus/model/textparse"
 )
 
 // ScrapeTimestampTolerance is the tolerance for scrape appends timestamps
@@ -735,7 +736,7 @@ func acceptEncodingHeader(enableCompression bool) string {
 
 var UserAgent = fmt.Sprintf("Prometheus/%s", version.Version)
 
-func (s *targetScraper) scrape(ctx context.Context) (*http.Response, error) {
+func (s *targetScraper) scrapeRequest() (*http.Request, error) {
 	if s.req == nil {
 		req, err := http.NewRequest(http.MethodGet, s.URL().String(), nil)
 		if err != nil {
@@ -748,8 +749,15 @@ func (s *targetScraper) scrape(ctx context.Context) (*http.Response, error) {
 
 		s.req = req
 	}
+	return s.req, nil
+}
 
-	return s.client.Do(s.req.WithContext(ctx))
+func (s *targetScraper) scrape(ctx context.Context) (*http.Response, error) {
+	req, err := s.scrapeRequest()
+	if err != nil {
+		return nil, err
+	}
+	return s.client.Do(req.WithContext(ctx))
 }
 
 func (s *targetScraper) readResponse(ctx context.Context, resp *http.Response, w io.Writer) (string, error) {
@@ -862,6 +870,8 @@ type scrapeLoop struct {
 	metrics *scrapeMetrics
 
 	skipOffsetting bool // For testability.
+
+	newParserFunc func() (textparse.Parser, error)
 }
 
 // scrapeCache tracks mappings of exposed metric strings to label sets and
@@ -1473,8 +1483,16 @@ type appendErrors struct {
 	numExemplarOutOfOrder int
 }
 
+func (sl *scrapeLoop) newParser(b []byte, contentType string) (textparse.Parser, error) {
+	if sl.newParserFunc != nil {
+		return sl.newParserFunc()
+	}
+	return textparse.New(b, contentType, sl.scrapeClassicHistograms, sl.symbolTable)
+}
+
 func (sl *scrapeLoop) append(app storage.Appender, b []byte, contentType string, ts time.Time) (total, added, seriesAdded int, err error) {
-	p, err := textparse.New(b, contentType, sl.scrapeClassicHistograms, sl.symbolTable)
+	p, err := sl.newParser(b, contentType)
+
 	if err != nil {
 		level.Debug(sl.l).Log(
 			"msg", "Invalid content type on scrape, using prometheus parser as fallback.",
