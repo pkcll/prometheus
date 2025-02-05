@@ -793,15 +793,8 @@ func TestManagerCTZeroIngestion(t *testing.T) {
 					}))
 
 					once := sync.Once{}
-					// Start fake HTTP target to that allow one scrape only.
-					ctrType := dto.MetricType_COUNTER
-					mf := &dto.MetricFamily{
-						Name:   proto.String(mName),
-						Type:   &ctrType,
-						Metric: []*dto.Metric{{Counter: tc.counterSample}},
-					}
-					mfs := []*dto.MetricFamily{mf}
 
+					// Start fake HTTP target to that allow one scrape only.
 					handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						fail := true
 						once.Do(func() {
@@ -823,15 +816,9 @@ func TestManagerCTZeroIngestion(t *testing.T) {
 						require.NoError(t, err)
 					} else {
 						// This enables scraper to read metrics from the handler directly without making HTTP request
-						SetDefaultGathererHandler(handler)
-						defer SetDefaultGathererHandler(nil)
 						serverURL, err = url.Parse("http://not-started:8080")
 						require.NoError(t, err)
 					}
-
-					testPromGatherer := prometheus.Gatherer(&testGatherer{t, mfs})
-					// This will cause scrapeLoop to a switch from ProtobufParser to GathererParser which reads directly from testPromGatherer
-					SetDefaultGatherer(testPromGatherer)
 
 					// Add fake target directly into tsets + reload. Normally users would use
 					// Manager.Run and wait for minimum 5s refresh interval.

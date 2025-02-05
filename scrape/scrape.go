@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-kit/log"
@@ -37,8 +36,6 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/version"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/model/exemplar"
@@ -322,14 +319,14 @@ func (sp *scrapePool) restartLoops(reuseCache bool) {
 		t := sp.activeTargets[fp]
 		interval, timeout, err := t.intervalAndTimeout(interval, timeout)
 		var (
-			s = newScraper(&targetScraper{
+			s = &targetScraper{
 				Target:               t,
 				client:               sp.client,
 				timeout:              timeout,
 				bodySizeLimit:        bodySizeLimit,
 				acceptHeader:         acceptHeader(sp.config.ScrapeProtocols),
 				acceptEncodingHeader: acceptEncodingHeader(enableCompression),
-			})
+			}
 			newLoop = sp.newLoop(scrapeLoopOptions{
 				target:                   t,
 				scraper:                  s,
@@ -466,7 +463,7 @@ func (sp *scrapePool) sync(targets []*Target) {
 			// for every target.
 			var err error
 			interval, timeout, err = t.intervalAndTimeout(interval, timeout)
-			s := newScraper(&targetScraper{
+			s := &targetScraper{
 				Target:               t,
 				client:               sp.client,
 				timeout:              timeout,
@@ -474,7 +471,7 @@ func (sp *scrapePool) sync(targets []*Target) {
 				acceptHeader:         acceptHeader(sp.config.ScrapeProtocols),
 				acceptEncodingHeader: acceptEncodingHeader(enableCompression),
 				metrics:              sp.metrics,
-			})
+			}
 			l := sp.newLoop(scrapeLoopOptions{
 				target:                   t,
 				scraper:                  s,
@@ -711,13 +708,6 @@ type targetScraper struct {
 	acceptEncodingHeader string
 
 	metrics *scrapeMetrics
-}
-
-func newScraper(ts *targetScraper) scraper {
-	if handler := GetDefaultGathererHandler(); handler != nil {
-		return &gathererScraper{ts, handler}
-	}
-	return ts
 }
 
 var errBodySizeLimit = errors.New("body size limit exceeded")
@@ -2023,104 +2013,4 @@ func pickSchema(bucketFactor float64) int32 {
 	default:
 		return int32(floor)
 	}
-}
-
-// Scraper implementation that fetches metrics data from Gatherer http.Handler.
-type gathererScraper struct {
-	*targetScraper
-	h http.Handler
-}
-
-type scrapeResult struct {
-	resp *http.Response
-	err  error
-}
-
-func (gs *gathererScraper) scrape(ctx context.Context) (*http.Response, error) {
-	resCh := make(chan scrapeResult, 1)
-	go func() {
-		defer close(resCh)
-		req, err := gs.scrapeRequest()
-		if err != nil {
-			resCh <- scrapeResult{nil, err}
-			return
-		}
-		w := newResponseWriter(req)
-		if gs.h != nil {
-			gs.h.ServeHTTP(w, req)
-		}
-		fmt.Println("[gathererScraper] scraping metrics")
-		resCh <- scrapeResult{w.response, nil}
-	}()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case r := <-resCh:
-		return r.resp, r.err
-	}
-}
-
-type responseWriter struct {
-	http.ResponseWriter
-	response *http.Response
-	// Writes to response body
-	w io.Writer
-}
-
-func newResponseWriter(req *http.Request) *responseWriter {
-	buf := new(bytes.Buffer)
-
-	return &responseWriter{
-		w: io.Writer(buf),
-		response: &http.Response{
-			Status:     http.StatusText(http.StatusOK),
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(buf),
-			Request:    req,
-		},
-	}
-}
-
-func (rw *responseWriter) Header() http.Header {
-	return rw.response.Header
-}
-
-func (rw *responseWriter) Write(data []byte) (int, error) {
-	return rw.w.Write(data)
-}
-
-func (rw *responseWriter) WriteHeader(statusCode int) {
-	rw.response.StatusCode = statusCode
-	rw.response.Status = fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode))
-}
-
-var (
-	defaultGathererHandler atomic.Pointer[http.Handler]
-
-	defaultGatherer atomic.Pointer[prometheus.Gatherer]
-)
-
-// This enables scraper to read metrics from the handler directly without making HTTP request
-func SetDefaultGathererHandler(h http.Handler) {
-	defaultGathererHandler.Store(&h)
-}
-
-func SetDefaultGatherer(g prometheus.Gatherer) {
-	defaultGatherer.Store(&g)
-	SetDefaultGathererHandler(promhttp.HandlerFor(g, promhttp.HandlerOpts{}))
-}
-
-func GetDefaultGathererHandler() http.Handler {
-	if h := defaultGathererHandler.Load(); h != nil {
-		return *h
-	}
-	return nil
-}
-
-func GetDefaultGatherer() prometheus.Gatherer {
-	if g := defaultGatherer.Load(); g != nil {
-		return *g
-	}
-	return nil
 }
